@@ -19,8 +19,11 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 
-#define TRIG_PIN 5
-#define ECHO_PIN 6
+//#define USE_LCD
+
+
+#define TRIG_PIN 2
+#define ECHO_PIN 3
 #define ECHO_INT 0
 
 
@@ -31,14 +34,17 @@
 NewPing sonar(TRIG_PIN, ECHO_PIN, 200);
 
 // initialize the stepper library on pins 8 through 11:
+//AccelStepper stepper(AccelStepper::FULL4WIRE, 4, 5, 6, 7);
 AccelStepper stepper(AccelStepper::FULL4WIRE, 8, 9, 10, 11);
 
 // Init the i2c LCD control at address 0x27
 LiquidCrystal_I2C  lcd(0x27,16,2);
 
 
-unsigned int pingSpeed = 500; // How frequently are we going to send out a ping (in milliseconds). 50ms would be 20 times a second.
+unsigned int pingSpeed = 250; // How frequently are we going to send out a ping (in milliseconds). 50ms would be 20 times a second.
 unsigned long pingTimer;     // Holds the next ping time.
+
+uint8_t syncByte = 0;
 
 typedef enum
 {
@@ -50,7 +56,6 @@ typedef enum
 
 
 char motorStatusPrefix[] = "Stat: ";
-int motorStatusPrefixSize = strlen(motorStatusPrefix);
 
 char *motorStatusMsgs[] =
 {
@@ -62,23 +67,36 @@ char *motorStatusMsgs[] =
 
 MotorStatus_t motorStatus = MOTOR_NOT_RUNNING;
 
-char distString[16];
+char distString[32];
 
 
 void DisplayMotorStatus(void)
 {
+#ifdef USE_LCD
 		lcd.setCursor(0,0);
 		lcd.print(motorStatusPrefix);
 		lcd.print(motorStatusMsgs[motorStatus]);
+#endif
+
 		Serial.println(motorStatusMsgs[motorStatus]);
 }
+
+void DisplaySecondLine(char* message)
+{
+#ifdef USE_LCD
+	lcd.setCursor(0,1);
+	lcd.print(message);
+#endif
+
+	Serial.println(message);
+}
+	
 
 void setup() {
 	// get serial port going
 	Serial.begin (115200);
-
 	// set stepper motor param
-	stepper.setMaxSpeed(1600.0);
+	stepper.setMaxSpeed(3500.0);
 	stepper.setAcceleration(10000.0);
 
 	// lcd init
@@ -88,20 +106,31 @@ void setup() {
 
 
 void loop() {
-	int motorSpeed;
-	long distFromNeutral;
+	long dist;
 	int dir;
+
 	if (millis() >= pingTimer) {   // pingSpeed milliseconds since last ping, do another ping.
 		pingTimer += pingSpeed;      // Set the next ping time.
 		sonar.ping_timer(echoCheck); // Send out the ping, calls "echoCheck" function every 24uS where you can check the ping status.
+
 	}
+
+	// detemine if the sensor got a reading
+	// then update the LCD
+	if (syncByte)
+	{
+		syncByte = 0;
+		DisplayMotorStatus();
+		DisplaySecondLine(distString);
+	}
+
 	stepper.run();
 }
 
 
 void echoCheck() { // Timer2 interrupt calls this function every 24uS where you can check the ping status.
-	//  Don't do anything here!
 	long dist;
+
 	if (sonar.check_timer()) { // This is how you check to see if the ping was received.
     
 		dist = sonar.ping_result / US_ROUNDTRIP_CM - TARGET_DIST;
@@ -110,30 +139,23 @@ void echoCheck() { // Timer2 interrupt calls this function every 24uS where you 
 		{
 			stepper.stop();
 			motorStatus = MOTOR_NOT_RUNNING;
-			DisplayMotorStatus();
 		}
 		else if ((motorStatus == MOTOR_RUNNING_DOWN) && (dist > 0))
 		{
 			stepper.stop();
 			motorStatus = MOTOR_NOT_RUNNING;
-			DisplayMotorStatus();
 		} else if ((dist > LIMIT_DIST) && (motorStatus != MOTOR_RUNNING_UP)) {
 			stepper.setCurrentPosition(0);
 			stepper.moveTo(-100000);
 			motorStatus = MOTOR_RUNNING_UP;
-			DisplayMotorStatus();
 		}
 		else if ((dist < -LIMIT_DIST) && (motorStatus != MOTOR_RUNNING_DOWN)) {
 			stepper.setCurrentPosition(0);
 			stepper.moveTo(100000);
 			motorStatus = MOTOR_RUNNING_DOWN;
-			DisplayMotorStatus();
 		}
 		// Here's where you can add code.
-		sprintf(distString, "dist: %3d cm", dist);
-		Serial.println(distString);
-		lcd.setCursor(0,1);
-		lcd.print(distString);
+		sprintf(distString, "dist: %3ld cm", dist);
+		syncByte = 1;
 	}
-// Don't do anything here!
 }
