@@ -1,5 +1,3 @@
-
-
 /*
  * Closed loop control of the take-up reel for the laser cutter
  *
@@ -11,40 +9,51 @@
  *
  */
 
-#include <SD.h>
+#include <TimerOne.h>
 #include <NewPing.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <AccelStepper.h>
 #include <Wire.h>
-#include <LiquidCrystal_I2C.h>
-
-//#define USE_LCD
 
 
 #define TRIG_PIN 2
 #define ECHO_PIN 3
 #define ECHO_INT 0
 
+void Timer1Callback(void);
+void echoCheck();
 
-#define TARGET_DIST 50  // how far in cm is the desired ZERO hight
+#define TARGET_DIST 50	// how far in cm is the desired ZERO hight
 #define LIMIT_DIST 15	// how much deviation from ZERO is ok
 
 // init the ultra sonic library
 NewPing sonar(TRIG_PIN, ECHO_PIN, 200);
 
-// initialize the stepper library on pins 8 through 11:
-//AccelStepper stepper(AccelStepper::FULL4WIRE, 4, 5, 6, 7);
-AccelStepper stepper(AccelStepper::FULL4WIRE, 8, 9, 10, 11);
+// initialize the stepper library on pins 8 and 9
+AccelStepper stepper(AccelStepper::DRIVER, 8, 9);
 
 // Init the i2c LCD control at address 0x27
-LiquidCrystal_I2C  lcd(0x27,16,2);
+LiquidCrystal_I2C lcd(0x3f,16,2);
 
 
-unsigned int pingSpeed = 250; // How frequently are we going to send out a ping (in milliseconds). 50ms would be 20 times a second.
-unsigned long pingTimer;     // Holds the next ping time.
+const unsigned int pingSpeed = 250;	// How frequently are we going to send out a ping (in milliseconds).
 
-uint8_t syncByte = 0;
+
+// Manage LCD update speed relative to Ping Speed
+const unsigned int displayUpdateSpeed = 1000;
+const unsigned int numPingsPerDisplayInterval = displayUpdateSpeed / pingSpeed;
+unsigned int numPingsSinceLastDisplay = 0;
+
+unsigned long pingTimer = 0;	// Holds the next ping time.
+
+uint8_t syncByte = 0;			// sync LCD callback and main loop
+
+#define SPEED_RPS (1.125)					// 67.5 RPM
+#define FULL_STEPS_PER_REV (200.0)			// This is a characteristic of the motor
+#define DRIVER_MICROSTEP_FACTOR (2.0)		// We are half-stepping
+
+#define ACCELERATION (3.0)					// Revs per sec^2
 
 typedef enum
 {
@@ -55,9 +64,9 @@ typedef enum
 
 
 
-char motorStatusPrefix[] = "Stat: ";
+char motorStatusPrefix[] = "Status: ";
 
-char *motorStatusMsgs[] =
+char const *motorStatusMsgs[] =
 {
 //   012345678901
 	"Stopped",
@@ -70,34 +79,54 @@ MotorStatus_t motorStatus = MOTOR_NOT_RUNNING;
 char distString[32];
 
 
-void DisplayMotorStatus(void)
-{
-#ifdef USE_LCD
-		lcd.setCursor(0,0);
-		lcd.print(motorStatusPrefix);
-		lcd.print(motorStatusMsgs[motorStatus]);
-#endif
+void DisplayMotorStatus(void) {
+	// to the lcd in the top row	
+	lcd.setCursor(0,0);
+	lcd.print(motorStatusPrefix);
+	lcd.print(motorStatusMsgs[motorStatus]);
 
-		Serial.println(motorStatusMsgs[motorStatus]);
+	// and out to the serial port
+	Serial.println(motorStatusMsgs[motorStatus]);
 }
 
-void DisplaySecondLine(char* message)
-{
-#ifdef USE_LCD
+void DisplaySecondLine(char* message) {
+	// to the lcd in the bottom row	
 	lcd.setCursor(0,1);
 	lcd.print(message);
-#endif
 
+	// and out to the serial port
 	Serial.println(message);
 }
 	
+// This is the callback fro the timer1 interrupt which we
+// have set up to trigger every 100uS. When the run call
+// has real work to do it delays quite a bit for the
+// timing of the step for the motor so se shut off the
+// interrupt and callback for the duration
+void Timer1Callback(void) {
+	Timer1.stop();
+	stepper.run();
+	Timer1.resume();
+}
+
+
+
 
 void setup() {
 	// get serial port going
 	Serial.begin (115200);
-	// set stepper motor param
-	stepper.setMaxSpeed(3500.0);
-	stepper.setAcceleration(10000.0);
+	
+	// set stepper motor speed in steps per second
+	stepper.setMaxSpeed(SPEED_RPS * FULL_STEPS_PER_REV * DRIVER_MICROSTEP_FACTOR);
+
+
+	// Set Acceleration in steps per sec^2
+	stepper.setAcceleration(ACCELERATION * FULL_STEPS_PER_REV * DRIVER_MICROSTEP_FACTOR);
+
+	// Set up timer1 to trigger every 100 uS and
+	// set the callback for when it occurs
+	Timer1.initialize(100);
+	Timer1.attachInterrupt(Timer1Callback); // blinkLED to run every 0.15 seconds
 
 	// lcd init
 	lcd.init();
@@ -106,42 +135,44 @@ void setup() {
 
 
 void loop() {
-	long dist;
-	int dir;
 
-	if (millis() >= pingTimer) {   // pingSpeed milliseconds since last ping, do another ping.
-		pingTimer += pingSpeed;      // Set the next ping time.
-		sonar.ping_timer(echoCheck); // Send out the ping, calls "echoCheck" function every 24uS where you can check the ping status.
+	if (millis() >= pingTimer) {		// pingSpeed milliseconds since last ping, do another ping.
+		pingTimer += pingSpeed;			// Set the next ping time.
+		digitalWrite(12, HIGH);
+		sonar.ping_timer(echoCheck);	// Send out the ping, calls "echoCheck" function every
+										// 24uS where you can check the ping status.
 
 	}
 
 	// detemine if the sensor got a reading
 	// then update the LCD
-	if (syncByte)
-	{
+	if (syncByte) {
 		syncByte = 0;
-		DisplayMotorStatus();
-		DisplaySecondLine(distString);
+
+		// do we need to update the display
+		if (++numPingsSinceLastDisplay >= numPingsPerDisplayInterval) {
+			numPingsSinceLastDisplay = 0;
+			DisplayMotorStatus();
+			DisplaySecondLine(distString);
+		}
 	}
 
-	stepper.run();
 }
 
 
-void echoCheck() { // Timer2 interrupt calls this function every 24uS where you can check the ping status.
+// Timer2 interrupt calls this function
+// every 24uS where you can check the ping status.
+void echoCheck() {
 	long dist;
 
-	if (sonar.check_timer()) { // This is how you check to see if the ping was received.
-    
+	if (sonar.check_timer()) {		// This is how you check to see if the ping was received.
 		dist = sonar.ping_result / US_ROUNDTRIP_CM - TARGET_DIST;
 
-		if ((motorStatus == MOTOR_RUNNING_UP) && (dist < 0))
-		{
+		if ((motorStatus == MOTOR_RUNNING_UP) && (dist < 0)) {
 			stepper.stop();
 			motorStatus = MOTOR_NOT_RUNNING;
 		}
-		else if ((motorStatus == MOTOR_RUNNING_DOWN) && (dist > 0))
-		{
+		else if ((motorStatus == MOTOR_RUNNING_DOWN) && (dist > 0)) {
 			stepper.stop();
 			motorStatus = MOTOR_NOT_RUNNING;
 		} else if ((dist > LIMIT_DIST) && (motorStatus != MOTOR_RUNNING_UP)) {
@@ -154,8 +185,11 @@ void echoCheck() { // Timer2 interrupt calls this function every 24uS where you 
 			stepper.moveTo(100000);
 			motorStatus = MOTOR_RUNNING_DOWN;
 		}
-		// Here's where you can add code.
-		sprintf(distString, "dist: %3ld cm", dist);
+
+		// make a nice string to display that has the distance
+		sprintf(distString, "Dist:  %3ld cm", dist);
+
+		// all done, let the main loop know
 		syncByte = 1;
 	}
 }
