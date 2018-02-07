@@ -34,7 +34,7 @@ NewPing sonar(TRIG_PIN, ECHO_PIN, 200);
 AccelStepper stepper(AccelStepper::DRIVER, 8, 9);
 
 // Init the i2c LCD control at address 0x27
-LiquidCrystal_I2C lcd(0x3f,16,2);
+LiquidCrystal_I2C lcd(0x27,16,2);
 
 
 const unsigned int pingSpeed = 250;	// How frequently are we going to send out a ping (in milliseconds).
